@@ -1,6 +1,6 @@
 streamlit
-paddleocr
-pdf2image
 pandas
+pdf2image
+pytesseract
 openpyxl
-Pillow
+pillow
