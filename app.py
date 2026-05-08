@@ -1,29 +1,63 @@
-RuntimeError: This app has encountered an error. The original error message is redacted to prevent data leaks. Full error details have been recorded in the logs (if you're on Streamlit Cloud, click on 'Manage app' in the lower right of your app).
-Traceback:
+import streamlit as st
+import pandas as pd
+from pdf2image import convert_from_bytes
+import pytesseract
+import re
+from io import BytesIO
 
-File "/mount/src/releve-to-excell/app.py", line 8, in <module>
-    from paddleocr import PaddleOCR
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddleocr/__init__.py", line 17, in <module>
-    from ._models import (
-    ...<13 lines>...
-    )
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddleocr/_models/__init__.py", line 15, in <module>
-    from .chart_parsing import ChartParsing
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddleocr/_models/chart_parsing.py", line 16, in <module>
-    from ._doc_vlm import (
-    ...<2 lines>...
-    )
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddleocr/_models/_doc_vlm.py", line 21, in <module>
-    from .base import PaddleXPredictorWrapper, PredictorCLISubcommandExecutor
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddleocr/_models/base.py", line 17, in <module>
-    from paddlex import create_predictor
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddlex/__init__.py", line 45, in <module>
-    _initialize()
-    ~~~~~~~~~~~^^
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddlex/__init__.py", line 42, in _initialize
-    repo_manager.initialize()
-    ~~~~~~~~~~~~~~~~~~~~~~~^^
-File "/home/adminuser/venv/lib/python3.14/site-packages/paddlex/repo_manager/core.py", line 214, in initialize
-    raise RuntimeError(
-        "PDX has already been initialized. Reinitialization is not supported."
-    )
+st.set_page_config(page_title="Relévé Bancaire to Excel", page_icon="📄", layout="wide")
+
+st.title("📄 Convertisseur Relévé Bancaire → Excel")
+st.write("Ampidiro ny PDF scanné dia ny mouvement ihany no halaina.")
+
+uploaded_file = st.file_uploader("Safidio ny fisie PDF", type=['pdf'])
+
+if uploaded_file is not None:
+    with st.spinner("Andalam-pamakiana ny PDF..."):
+        images = convert_from_bytes(uploaded_file.read())
+        all_lines = []
+        progress_bar = st.progress(0)
+        
+        for i, image in enumerate(images):
+            text = pytesseract.image_to_string(image, lang='fra')
+            lines = text.split('\n')
+            all_lines.extend(lines)
+            progress_bar.progress((i + 1) / len(images))
+        
+        st.success(f"Vita ny famakiana {len(images)} pejy!")
+        
+        date_pattern = r'^(\d{2}[/\.\-]\d{2}[/\.\-]\d{2,4})'
+        mouvements = []
+        
+        for line in all_lines:
+            line = line.strip()
+            if re.match(date_pattern, line):
+                match = re.match(r'^(\d{2}[/\.\-]\d{2}[/\.\-]\d{2,4})\s+(.*)', line)
+                if match:
+                    date_val = match.group(1)
+                    rest = match.group(2)
+                    amount_match = re.search(r'(\d{1,3}(?:[\s\.]\d{3})*,\d{2}|\d+\.\d{2})\s*$', rest)
+                    if amount_match:
+                        amount = amount_match.group(1)
+                        libelle = rest[:amount_match.start()].strip()
+                        mouvements.append({'Date': date_val, 'Libelle': libelle, 'Montant': amount})
+                    else:
+                        mouvements.append({'Date': date_val, 'Libelle': rest, 'Montant': ''})
+        
+        if mouvements:
+            df = pd.DataFrame(mouvements)
+            st.subheader(f"Mouvement hita: {len(df)}")
+            st.dataframe(df, use_container_width=True)
+            
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Mouvements')
+            
+            st.download_button(
+                label="Download Excel",
+                data=output.getvalue(),
+                file_name='mouvement_bancaire.xlsx',
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+        else:
+            st.warning("Tsy nisy mouvement hita.")
