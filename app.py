@@ -9,6 +9,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 st.set_page_config(page_title="Relévé Bancaire to Excel", page_icon="📄", layout="wide")
 
 st.title("📄 Convertisseur Relévé Bancaire → Excel")
+st.write("Universel - mahay format banky maro samihafa")
 
 # Init session state
 if 'df_result' not in st.session_state:
@@ -20,6 +21,17 @@ if 'debug_text' not in st.session_state:
 
 uploaded_file = st.file_uploader("Safidio ny fisie PDF", type=['pdf'])
 
+# Option ho an'ny taona (ho an'ny relévé tahaka ny Qonto izay tsy misy taona)
+col_opt1, col_opt2 = st.columns(2)
+with col_opt1:
+    default_year = st.number_input("Taona default (raha tsy misy ao @ PDF)", 
+                                    min_value=2000, max_value=2100, value=2025)
+with col_opt2:
+    detection_mode = st.selectbox(
+        "Fomba famantarana Débit/Crédit",
+        ["Auto (signe + ou -)", "Position colonne (X)", "Mots-clés"]
+    )
+
 if uploaded_file is not None and st.session_state.df_result is None:
     if st.button("🚀 Manomboka ny lecture", type="primary"):
         with st.spinner("Andalam-pamakiana ny PDF..."):
@@ -29,8 +41,15 @@ if uploaded_file is not None and st.session_state.df_result is None:
             debug_text = ""
             progress_bar = st.progress(0)
             
-            date_pattern = re.compile(r'^\d{2}[/\.\-]\d{2}[/\.\-]\d{2,4}$')
-            amount_pattern = re.compile(r'^\d{1,3}(?:[\s\.]\d{3})*,\d{2}$')
+            # Pattern daty: JJ/MM, JJ/MM/AA, JJ/MM/AAAA (na - na .)
+            date_pattern = re.compile(r'^\d{1,2}[/\.\-]\d{1,2}(?:[/\.\-]\d{2,4})?$')
+            
+            # Pattern montant: 218.00 na 218,00 na 1 250.00 na 1 250,00
+            # Mety hisy + na - eo aloha
+            amount_pattern = re.compile(r'^[+\-]?\d{1,3}(?:[\s\.\,]\d{3})*[\.\,]\d{2}$')
+            
+            # Pattern mahay maka montant misy "EUR" na "€"
+            amount_with_currency = re.compile(r'([+\-]?\s*\d{1,3}(?:[\s\.\,]\d{3})*[\.\,]\d{2})')
             
             for page_num, image in enumerate(images):
                 data = pytesseract.image_to_data(
@@ -53,7 +72,8 @@ if uploaded_file is not None and st.session_state.df_result is None:
                     lines_dict[line_key].append({
                         'text': text,
                         'left': data['left'][i],
-                        'width': data['width'][i]
+                        'width': data['width'][i],
+                        'top': data['top'][i]
                     })
                 
                 for line_key in sorted(lines_dict.keys()):
@@ -61,26 +81,80 @@ if uploaded_file is not None and st.session_state.df_result is None:
                     line_text = ' '.join([w['text'] for w in words])
                     debug_text += line_text + "\n"
                     
+                    # Manangona ny daty, montants, libellé
                     dates = []
-                    amounts = []
+                    amounts_found = []  # liste de (text, signe, position_x)
                     libelle_words = []
+                    
+                    # Mandrakotra ny ligne manontolo amin'ny lahatsoratra
+                    full_line = line_text
+                    
+                    # Mitady montants amin'ny ligne (mahay misy + na -)
+                    # Tadiavo ihany koa ny "EUR" sy "€" mba ho azo aleo manomboka @ izy ireo
                     
                     for w in words:
                         if date_pattern.match(w['text']):
                             dates.append(w)
-                        elif amount_pattern.match(w['text']):
-                            amounts.append(w)
-                        else:
-                            libelle_words.append(w['text'])
                     
+                    # Mitady montants ankoatra ny daty
+                    # Mampiasa pattern misimisy kokoa hahafahana mahita "+ 218.00" "- 147.35"
+                    
+                    # Manangona word marobe mety ho montant: "+", "218.00", "EUR"
+                    i = 0
+                    while i < len(words):
+                        w = words[i]
+                        text = w['text']
+                        
+                        # Famaritana raha misy "+" na "-" eo aloha
+                        sign = ''
+                        if text in ['+', '-']:
+                            sign = text
+                            if i + 1 < len(words):
+                                i += 1
+                                w = words[i]
+                                text = w['text']
+                        
+                        # Famaritana raha montant ity
+                        clean_text = text.replace(',', '.').replace(' ', '')
+                        is_amount = bool(re.match(r'^\d{1,3}(?:[\.\,\s]\d{3})*\.\d{2}$', clean_text)) or \
+                                    bool(re.match(r'^\d+\.\d{2}$', clean_text))
+                        
+                        if is_amount and not date_pattern.match(text):
+                            # Skip raha "EUR" manaraka azy (jereo fa montant ity)
+                            amounts_found.append({
+                                'text': text,
+                                'sign': sign,
+                                'left': w['left'],
+                                'width': w['width']
+                            })
+                        elif not date_pattern.match(text) and text not in ['EUR', '€', '+', '-']:
+                            libelle_words.append(text)
+                        
+                        i += 1
+                    
+                    # Raha tsy misy daty dia ligne suite (ampidirina @ libellé taloha)
                     if not dates:
-                        if all_rows and not amounts:
-                            extra = ' '.join([w['text'] for w in words])
+                        if all_rows and not amounts_found:
+                            extra = ' '.join([w['text'] for w in words 
+                                            if w['text'] not in ['EUR', '€']])
                             all_rows[-1]['Libelle ou Operation'] += ' ' + extra
                         continue
                     
-                    date_op = dates[0]['text'] if len(dates) >= 1 else ''
-                    date_val = dates[1]['text'] if len(dates) >= 2 else ''
+                    # Mametraka taona raha tsy misy
+                    def fix_date(d_text):
+                        parts = re.split(r'[/\.\-]', d_text)
+                        if len(parts) == 2:
+                            # JJ/MM fotsiny → ampiana taona
+                            return f"{parts[0].zfill(2)}/{parts[1].zfill(2)}/{default_year}"
+                        elif len(parts) == 3:
+                            day, month, year = parts
+                            if len(year) == 2:
+                                year = '20' + year
+                            return f"{day.zfill(2)}/{month.zfill(2)}/{year}"
+                        return d_text
+                    
+                    date_op = fix_date(dates[0]['text']) if len(dates) >= 1 else ''
+                    date_val = fix_date(dates[1]['text']) if len(dates) >= 2 else date_op
                     
                     libelle = ' '.join(libelle_words).strip()
                     libelle = re.sub(r'\s+', ' ', libelle)
@@ -88,14 +162,38 @@ if uploaded_file is not None and st.session_state.df_result is None:
                     debit = ''
                     credit = ''
                     
-                    if amounts:
-                        for amt in amounts:
-                            center_x = amt['left'] + amt['width'] / 2
-                            position_ratio = center_x / img_width
-                            if position_ratio > 0.82:
-                                credit = amt['text']
-                            else:
-                                debit = amt['text']
+                    if amounts_found:
+                        for amt in amounts_found:
+                            amt_value = amt['text']
+                            
+                            if detection_mode == "Auto (signe + ou -)":
+                                if amt['sign'] == '+':
+                                    credit = amt_value
+                                elif amt['sign'] == '-':
+                                    debit = amt_value
+                                else:
+                                    # Tsy misy signe → mampiasa position
+                                    center_x = amt['left'] + amt['width'] / 2
+                                    if center_x / img_width > 0.75:
+                                        credit = amt_value
+                                    else:
+                                        debit = amt_value
+                            
+                            elif detection_mode == "Position colonne (X)":
+                                center_x = amt['left'] + amt['width'] / 2
+                                if center_x / img_width > 0.75:
+                                    credit = amt_value
+                                else:
+                                    debit = amt_value
+                            
+                            else:  # Mots-clés
+                                lib_low = libelle.lower()
+                                credit_kw = ['versement', 'virement recu', 'remboursement', 
+                                           'salaire', 'depot']
+                                if any(kw in lib_low for kw in credit_kw):
+                                    credit = amt_value
+                                else:
+                                    debit = amt_value
                     
                     all_rows.append({
                         'Date': date_op,
@@ -151,12 +249,24 @@ if st.session_state.df_result is not None:
             if val is None or pd.isna(val) or str(val).strip() == '':
                 return 0.0
             try:
-                val_str = str(val).strip().replace(' ', '').replace('.', '').replace(',', '.')
-                return float(val_str)
+                val_str = str(val).strip()
+                # Esorina ny + sy - ho ihany ny tarehimarika
+                val_str = val_str.replace('+', '').replace(' ', '')
+                # Mahay format frantsay (1 250,00) sy anglisy (1,250.00)
+                if ',' in val_str and '.' in val_str:
+                    # 1,250.00 (format anglisy) na 1.250,00 (frantsay)
+                    if val_str.rfind(',') > val_str.rfind('.'):
+                        # frantsay
+                        val_str = val_str.replace('.', '').replace(',', '.')
+                    else:
+                        # anglisy
+                        val_str = val_str.replace(',', '')
+                elif ',' in val_str:
+                    val_str = val_str.replace(',', '.')
+                return abs(float(val_str))
             except:
                 return 0.0
         
-        # RECALCUL TANTERAKA isaky ny rerun
         df_calc = df_final.copy()
         df_calc['_d'] = df_calc['Debits'].apply(parse_amount)
         df_calc['_c'] = df_calc['Credits'].apply(parse_amount)
@@ -181,11 +291,6 @@ if st.session_state.df_result is not None:
             st.markdown(f"<div style='background:#e2e3e5;padding:15px;border-radius:8px;text-align:center;'><div style='color:#666;font-size:14px;'>Solde (C - D)</div><div style='font-size:26px;font-weight:bold;color:{color};'>{fmt(solde)}</div></div>", unsafe_allow_html=True)
         
         st.markdown("")
-        
-        if abs(solde) < 0.01:
-            st.success(f"✅ Mifanaraka tsara ny compte: Débits = Crédits = {fmt(total_debit)}")
-        else:
-            st.warning(f"⚠️ Écart: {fmt(solde)} | Débits: {fmt(total_debit)} | Crédits: {fmt(total_credit)}")
         
         st.markdown("---")
         st.subheader("📥 Export")
